@@ -90,6 +90,14 @@ pub fn locate_tools(app: &AppHandle, cache: &CachedToolPaths) -> Result<ToolPath
     Ok(paths)
 }
 
+fn resolve_relative_path(path: &Path, base: &Path) -> PathBuf {
+    if path.is_relative() {
+        base.join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn locate_tools_internal(app: &AppHandle) -> Result<ToolPaths> {
     let target = current_tool_target()?;
     let names = tool_names_for_target(&target)
@@ -140,11 +148,21 @@ fn locate_tools_internal(app: &AppHandle) -> Result<ToolPaths> {
     let default_ffprobe = default_root.join("ffmpeg").join("bin").join(names.ffprobe);
     let default_deno = default_root.join("deno").join(names.deno);
 
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|parent| parent.to_path_buf()));
+
     let get_path = |custom: &str, default: PathBuf, rel: String| -> (PathBuf, String) {
         if custom.is_empty() {
             (default, rel)
         } else {
-            (PathBuf::from(custom), custom.to_string())
+            let path = PathBuf::from(custom);
+            let resolved = if let Some(ref exe_dir) = exe_dir {
+                resolve_relative_path(&path, exe_dir)
+            } else {
+                path
+            };
+            (resolved, custom.to_string())
         }
     };
 
@@ -1368,6 +1386,16 @@ pub fn open_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_relative_path_correctly() {
+        let base = Path::new("/app/dir");
+        let rel = Path::new("tools/yt-dlp.exe");
+        let abs = Path::new("/other/dir/yt-dlp.exe");
+
+        assert_eq!(resolve_relative_path(rel, base), PathBuf::from("/app/dir/tools/yt-dlp.exe"));
+        assert_eq!(resolve_relative_path(abs, base), PathBuf::from("/other/dir/yt-dlp.exe"));
+    }
 
     #[test]
     fn maps_supported_platform_arch_pairs_to_tool_targets() {
