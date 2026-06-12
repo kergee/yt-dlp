@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>yt-dlp-tauri</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <p class="eyebrow" data-i18n="app.eyebrow">Desktop downloader</p>
+          <h1>yt-dlp-tauri</h1>
+        </div>
+        <div class="top-actions">
+          <div class="language-toggle" role="group" data-i18n-aria-label="language.label" aria-label="Language">
+            <button id="language-en" class="segment" type="button" data-language="en">EN</button>
+            <button id="language-zh" class="segment" type="button" data-language="zh">中</button>
+          </div>
+          <button id="settings-toggle" class="button secondary" type="button" data-i18n="action.settings">Settings</button>
+        </div>
+      </header>
+
+      <section class="download-surface" aria-labelledby="app-title">
+        <div class="surface-header">
+          <div>
+            <h2 id="app-title" data-i18n="app.heading">Paste, choose, download.</h2>
+          </div>
+          <div id="notice" class="notice is-warning">Checking tools...</div>
+        </div>
+
+        <section class="url-panel" aria-labelledby="url-heading">
+          <label for="url" id="url-heading" data-i18n="url.label">Video URL</label>
+          <div class="url-row">
+            <input
+              id="url"
+              type="url"
+              spellcheck="false"
+              data-i18n-placeholder="url.placeholder"
+              placeholder="https://www.youtube.com/watch?v=..."
+            />
+            <button id="parse" class="button primary" type="button" data-i18n="action.parse">Parse</button>
+          </div>
+          <div class="cookie-row" data-i18n-aria-label="cookies.label" aria-label="Cookie file">
+            <div class="cookie-status">
+              <span class="cookie-label" data-i18n="cookies.label">Cookie file</span>
+              <span id="cookies-file" class="cookie-file">No cookies</span>
+            </div>
+            <div class="cookie-actions">
+              <button id="web-login" class="button secondary compact" type="button" data-i18n="action.webLogin">Web Login</button>
+              <button id="choose-cookies" class="button secondary compact" type="button" data-i18n="action.chooseCookies">Choose Cookie file</button>
+              <button id="clear-cookies" class="button secondary compact" type="button" data-i18n="action.clearCookies">Clear</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="preview-panel" aria-labelledby="preview-heading">
+          <div class="media-frame">
+            <img id="thumbnail" alt="video thumbnail" data-i18n-alt="preview.thumbnailAlt" referrerpolicy="no-referrer" hidden />
+            <div id="thumbnail-empty" class="empty-thumbnail">
+              <span class="empty-mark" aria-hidden="true"></span>
+              <span data-i18n="preview.emptyImage">Preview</span>
+            </div>
+          </div>
+          <div class="preview-copy">
+            <p id="preview-heading" class="section-kicker" data-i18n="preview.label">Preview</p>
+            <h3 id="video-title">No video parsed</h3>
+            <p id="video-details">Paste a video URL to inspect title, cover, duration, and qualities.</p>
+            <p id="video-description"></p>
+          </div>
+        </section>
+
+        <section class="download-panel" aria-labelledby="download-heading">
+          <div class="quality-field">
+            <label for="quality" id="download-heading" data-i18n="download.quality">Quality</label>
+            <select id="quality" disabled></select>
+          </div>
+          <div class="download-actions">
+            <button id="download" class="button primary" type="button" disabled data-i18n="action.download">Download</button>
+            <button id="cancel" class="button danger" type="button" disabled data-i18n="action.cancel">Cancel</button>
+            <button id="open-folder" class="button secondary" type="button" data-i18n="action.openFolder">Open folder</button>
+          </div>
+          <progress id="progress" max="100" value="0"></progress>
+          <p id="progress-text" class="progress-text">Idle</p>
+        </section>
+      </section>
+    </main>
+
+    <div id="settings-backdrop" class="settings-backdrop" hidden></div>
+    <aside id="settings-drawer" class="settings-drawer" aria-labelledby="settings-title" aria-hidden="true" hidden>
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow" data-i18n="settings.kicker">Preferences</p>
+          <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
+        </div>
+        <button id="settings-close" class="icon-button" type="button" data-i18n-aria-label="action.close" aria-label="Close">×</button>
+      </div>
+
+      <section class="settings-section" aria-labelledby="folder-heading">
+        <div class="settings-section-header">
+          <h3 id="folder-heading" data-i18n="settings.outputFolder">Output folder</h3>
+          <p id="folder-text">Resolving download folder...</p>
+        </div>
+        <input id="folder-input" type="text" spellcheck="false" />
+        <div class="split-actions">
+          <button id="browse-folder" class="button secondary" type="button" data-i18n="action.browse">Browse</button>
+          <button id="save-folder" class="button secondary" type="button" data-i18n="action.save">Save</button>
+          <button id="reset-folder" class="button secondary" type="button" data-i18n="action.reset">Reset</button>
+        </div>
+      </section>
+
+      <section class="settings-section" aria-labelledby="tools-heading">
+        <div class="settings-section-header settings-section-header--row">
+          <h3 id="tools-heading" data-i18n="settings.toolchain">Toolchain</h3>
+          <button id="tools-info-btn" class="button secondary tool-info-btn">i</button>
+        </div>
+        
+        <p data-i18n="settings.toolchainHint">Please manually download the required tools to the path below.</p>
+        
+        <div class="tool-item-input">
+          <label>yt-dlp</label>
+          <div class="tool-input-row">
+            <input id="yt-dlp-input" type="text" spellcheck="false" placeholder="Default path..." />
+            <button id="browse-yt-dlp" class="button secondary compact" type="button">Browse</button>
+          </div>
+        </div>
+
+        <div class="tool-item-input">
+          <label>ffmpeg</label>
+          <div class="tool-input-row">
+            <input id="ffmpeg-input" type="text" spellcheck="false" placeholder="Default path..." />
+            <button id="browse-ffmpeg" class="button secondary compact" type="button">Browse</button>
+          </div>
+        </div>
+
+        <div class="tool-item-input">
+          <label>ffprobe</label>
+          <div class="tool-input-row">
+            <input id="ffprobe-input" type="text" spellcheck="false" placeholder="Default path..." />
+            <button id="browse-ffprobe" class="button secondary compact" type="button">Browse</button>
+          </div>
+        </div>
+
+        <div class="tool-item-input">
+          <label>deno</label>
+          <div class="tool-input-row">
+            <input id="deno-input" type="text" spellcheck="false" placeholder="Default path..." />
+            <button id="browse-deno" class="button secondary compact" type="button">Browse</button>
+          </div>
+        </div>
+
+        <div class="split-actions">
+          <button id="save-tools" class="button secondary" type="button" data-i18n="action.save">Save</button>
+        </div>
+      </section>
+
+
+      <footer class="settings-footer">
+        <div class="settings-footer-main">
+          <div class="settings-version-line">
+            <span data-i18n="settings.version">Version</span>
+            <span id="app-version">0.1.0</span>
+          </div>
+        </div>
+      </footer>
+    </aside>
+  </body>
+</html>

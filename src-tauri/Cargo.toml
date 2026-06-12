@@ -1,0 +1,32 @@
+[package]
+name = "yt-dlp-tauri"
+version = "0.1.5"
+description = "A minimal Tauri desktop downloader powered by yt-dlp"
+authors = ["Chlie"]
+license = "GPL-3.0-only"
+repository = "https://github.com/Chlience/yt-dlp-tauri"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "yt_dlp_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2"
+sha2 = "0.10"
+tokio = { version = "1", features = ["time"] }
+url = "2"
+thiserror = "1"
+zip = "2"
