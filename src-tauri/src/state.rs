@@ -133,6 +133,12 @@ pub struct DownloadProcessState {
     pub cancel_requested: Arc<Mutex<bool>>,
 }
 
+/// Tracks which site the (singleton, reused) login webview window is currently
+/// pointed at, so the cookie-sync-on-close handler reads the *current* target
+/// even when the window is reused across multiple `open_login_window` calls.
+#[derive(Default)]
+pub struct LoginState(pub Mutex<Option<String>>);
+
 pub struct PreparedCookiesFile {
     pub path: PathBuf,
     pub temporary: bool,

@@ -1,5 +1,5 @@
 use crate::error::{AppError, Result};
-use crate::state::AppState;
+use crate::state::{AppState, LoginState};
 use crate::utils::{
     append_log, build_app_state, http_url_host, state_directory, validate_http_url,
     COOKIE_HEADER_EXPIRY,
@@ -110,44 +110,60 @@ async fn sync_webview_cookies_internal(app: &AppHandle, cookie_lookup_url: &str)
 pub async fn open_login_window(app: AppHandle, target_url: Option<String>) -> Result<()> {
     let (login_url, cookie_lookup_url) = resolve_login_target(target_url.as_deref());
 
+    // Record the current target so the (possibly already-registered) close handler
+    // below reads the latest site even when the login window is being reused.
+    if let Ok(mut guard) = app.state::<LoginState>().0.lock() {
+        *guard = Some(cookie_lookup_url.clone());
+    }
+
     tauri::async_runtime::spawn(async move {
+        let url = match tauri::Url::parse(&login_url) {
+            Ok(u) => u,
+            Err(e) => {
+                append_log("login", &format!("Failed to parse login URL: {e}"));
+                return;
+            }
+        };
+
         if let Some(window) = app.get_webview_window("login") {
+            if let Err(e) = window.navigate(url) {
+                append_log("login", &format!("Failed to navigate login window: {e}"));
+            }
             let _ = window.set_focus();
-        } else {
-            let url = match tauri::Url::parse(&login_url) {
-                Ok(u) => u,
-                Err(e) => {
-                    append_log("login", &format!("Failed to parse login URL: {e}"));
-                    return;
-                }
-            };
+            return;
+        }
 
-            let builder = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
-                .title("Web Login")
-                .inner_size(800.0, 600.0);
+        let builder = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
+            .title("Web Login")
+            .inner_size(800.0, 600.0);
 
-            match builder.build() {
-                Ok(window) => {
-                    let app_handle = app.clone();
-                    window.on_window_event(move |event| {
-                        if let WindowEvent::Destroyed = event {
-                            let app_clone = app_handle.clone();
-                            let cookie_lookup_url = cookie_lookup_url.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) =
-                                    sync_webview_cookies_internal(&app_clone, &cookie_lookup_url).await
-                                {
-                                    append_log("login", &format!("Cookie auto-sync failed: {e}"));
-                                } else {
-                                    append_log("login", "Cookie auto-sync successful.");
-                                }
-                            });
-                        }
-                    });
-                }
-                Err(e) => {
-                    append_log("login", &format!("Failed to build login window: {e}"));
-                }
+        match builder.build() {
+            Ok(window) => {
+                let app_handle = app.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::Destroyed = event {
+                        let app_clone = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let cookie_lookup_url = app_clone
+                                .state::<LoginState>()
+                                .0
+                                .lock()
+                                .ok()
+                                .and_then(|guard| guard.clone())
+                                .unwrap_or_else(|| DEFAULT_COOKIE_LOOKUP_URL.to_string());
+                            if let Err(e) =
+                                sync_webview_cookies_internal(&app_clone, &cookie_lookup_url).await
+                            {
+                                append_log("login", &format!("Cookie auto-sync failed: {e}"));
+                            } else {
+                                append_log("login", "Cookie auto-sync successful.");
+                            }
+                        });
+                    }
+                });
+            }
+            Err(e) => {
+                append_log("login", &format!("Failed to build login window: {e}"));
             }
         }
     });

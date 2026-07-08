@@ -6,7 +6,7 @@ pub mod utils;
 pub mod zip_utils;
 pub mod commands;
 
-use state::{CachedToolPaths, DownloadProcessState};
+use state::{CachedToolPaths, DownloadProcessState, LoginState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,6 +15,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(DownloadProcessState::default())
         .manage(CachedToolPaths::default())
+        .manage(LoginState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_state,
             commands::set_tools_directory,

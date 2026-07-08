@@ -701,7 +701,6 @@ async function downloadCurrentVideo() {
         url,
         format_selector: selectedFormat.format_selector,
         label: selectedFormat.label,
-        title: metadata.title,
       },
     });
     elements.progress.value = 100;
