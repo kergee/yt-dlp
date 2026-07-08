@@ -23,6 +23,8 @@ pub fn run() {
             commands::reset_download_directory,
             commands::set_cookies_file,
             commands::clear_cookies_file,
+            commands::set_proxy_url,
+            commands::clear_proxy_url,
             commands::open_download_directory,
             commands::check_tools,
             commands::parse_metadata,

@@ -1,31 +1,21 @@
+use super::paths::{app_data_root, state_directory, unix_timestamp};
+use super::process::{background_command, first_line, process_failure_message};
 use crate::error::{AppError, Result};
 use crate::state::{
-    AppState, CachedToolPaths, DownloadProcessState, DownloadProgress, ManifestTarget,
-    ManifestTool, ManifestToolKind, PreparedCookiesFile, ToolInstallProgress, ToolNames,
-    ToolPaths, ToolStatus, ToolsConfig, ToolsManifest, VideoFormatOption, VideoMetadata,
+    CachedToolPaths, ManifestTarget, ManifestTool, ManifestToolKind, ToolInstallProgress,
+    ToolNames, ToolPaths, ToolStatus, ToolsConfig, ToolsManifest,
 };
 use crate::zip_utils::extract_zip_archive;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const TOOLS_DIRECTORY: &str = "Tools";
 pub const TOOLS_MANIFEST_FILE: &str = "tools-manifest.json";
-pub const PROGRESS_PREFIX: &str = "yt-dlp-tauri-progress:";
-pub const OUTPUT_PATH_PREFIX: &str = "yt-dlp-tauri-output:";
-pub const COOKIE_HEADER_EXPIRY: &str = "2147483647";
-pub const BEST_MP4_FORMAT: &str = "bv*[vcodec^=avc][ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b";
-
-#[cfg(windows)]
-pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn read_tools_config() -> Result<ToolsConfig> {
     let state_dir = state_directory()?;
@@ -46,32 +36,6 @@ pub fn save_tools_config(config: &ToolsConfig) -> Result<()> {
     let content = serde_json::to_string_pretty(config)?;
     fs::write(&config_path, content)?;
     Ok(())
-}
-
-pub fn build_app_state(tools_root: String) -> Result<AppState> {
-    let config = read_tools_config().unwrap_or_default();
-    
-    let cookies = cookies_file()?.map(|p| p.display().to_string());
-    let cookies_status = if let Some(ref path) = cookies {
-        if PathBuf::from(path).exists() {
-            "valid".to_string()
-        } else {
-            "warning".to_string()
-        }
-    } else {
-        "none".to_string()
-    };
-
-    Ok(AppState {
-        download_directory: download_directory()?.display().to_string(),
-        tools_root,
-        yt_dlp_path: config.yt_dlp_path,
-        ffmpeg_path: config.ffmpeg_path,
-        ffprobe_path: config.ffprobe_path,
-        deno_path: config.deno_path,
-        cookies_file: cookies,
-        cookies_status,
-    })
 }
 
 pub fn locate_tools(app: &AppHandle, cache: &CachedToolPaths) -> Result<ToolPaths> {
@@ -102,9 +66,9 @@ fn locate_tools_internal(app: &AppHandle) -> Result<ToolPaths> {
     let target = current_tool_target()?;
     let names = tool_names_for_target(&target)
         .ok_or_else(|| AppError::Custom(format!("Unsupported tool target: {target}.")))?;
-    
+
     let config = read_tools_config().unwrap_or_default();
-    
+
     let mut roots = Vec::new();
     if let Ok(root) = writable_tools_root(&target) {
         roots.push(root);
@@ -242,6 +206,19 @@ pub fn tool_relative_path(target: &str, segments: &[&str]) -> String {
 
 pub fn writable_tools_root(_target: &str) -> Result<PathBuf> {
     tools_directory()
+}
+
+pub fn tools_directory() -> Result<PathBuf> {
+    let state_dir = state_directory()?;
+    let path_file = state_dir.join("tools-directory.txt");
+    if let Ok(content) = fs::read_to_string(&path_file) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    let target = current_tool_target()?;
+    Ok(app_data_root()?.join(TOOLS_DIRECTORY).join(target))
 }
 
 pub fn read_manifest_target(app: &AppHandle, target: &str) -> Result<ManifestTarget> {
@@ -743,649 +720,14 @@ pub fn probe_tool(
     }
 }
 
-pub fn parse_metadata_json(json: &str, fallback_url: &str) -> Result<VideoMetadata> {
-    if json.trim().is_empty() {
-        return Err(AppError::Custom("yt-dlp returned empty metadata.".to_string()));
-    }
-
-    let root: Value = serde_json::from_str(json)?;
-    let title = root
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Untitled video")
-        .to_string();
-    let id = root.get("id").and_then(Value::as_str).map(str::to_string);
-    let webpage_url = root
-        .get("webpage_url")
-        .or_else(|| root.get("original_url"))
-        .and_then(Value::as_str)
-        .unwrap_or(fallback_url)
-        .to_string();
-    let thumbnail_urls = read_thumbnail_urls(&root);
-    let thumbnail_url = thumbnail_urls.first().cloned();
-    let duration_seconds = root.get("duration").and_then(Value::as_f64);
-    let description = root
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let format_options = build_format_options(&root);
-
-    Ok(VideoMetadata {
-        title,
-        id,
-        webpage_url,
-        thumbnail_url,
-        thumbnail_urls,
-        duration_seconds,
-        description,
-        format_options,
-    })
-}
-
-fn build_format_options(root: &Value) -> Vec<VideoFormatOption> {
-    let mut options = vec![VideoFormatOption {
-        label: "Best MP4".to_string(),
-        format_selector: BEST_MP4_FORMAT.to_string(),
-        height: None,
-        extension: "mp4".to_string(),
-        is_best: true,
-    }];
-
-    for height in read_available_heights(root).into_iter().rev() {
-        options.push(VideoFormatOption {
-            label: format!("{height}p MP4"),
-            format_selector: format!(
-                "bv*[height<={height}][vcodec^=avc][ext=mp4]+ba[ext=m4a]/bv*[height<={height}][ext=mp4]+ba[ext=m4a]/b[height<={height}][ext=mp4]/bv*[height<={height}]+ba/b[height<={height}]"
-            ),
-            height: Some(height),
-            extension: "mp4".to_string(),
-            is_best: false,
-        });
-    }
-
-    options
-}
-
-fn read_available_heights(root: &Value) -> Vec<u32> {
-    let mut heights = BTreeSet::new();
-    if let Some(formats) = root.get("formats").and_then(Value::as_array) {
-        for format in formats {
-            let height = format.get("height").and_then(Value::as_u64);
-            let video_codec = format.get("vcodec").and_then(Value::as_str);
-            if let Some(height) = height {
-                if height > 0 && video_codec.map(|codec| codec != "none").unwrap_or(true) {
-                    heights.insert(height as u32);
-                }
-            }
-        }
-    }
-    heights.into_iter().collect()
-}
-
-fn read_thumbnail_urls(root: &Value) -> Vec<String> {
-    let mut urls = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    if let Some(url) = root.get("thumbnail").and_then(Value::as_str) {
-        push_thumbnail_url(&mut urls, &mut seen, url);
-    }
-
-    if let Some(items) = root.get("thumbnails").and_then(Value::as_array) {
-        for url in items
-            .iter()
-            .rev()
-            .filter_map(|item| item.get("url").and_then(Value::as_str))
-        {
-            push_thumbnail_url(&mut urls, &mut seen, url);
-        }
-    }
-
-    urls
-}
-
-fn push_thumbnail_url(urls: &mut Vec<String>, seen: &mut BTreeSet<String>, raw_url: &str) {
-    let trimmed = raw_url.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("null")
-        || trimmed.eq_ignore_ascii_case("none")
-    {
-        return;
-    }
-
-    let normalized = if trimmed.starts_with("//") {
-        format!("https:{trimmed}")
-    } else {
-        trimmed.to_string()
-    };
-
-    if let Some(rest) = normalized.strip_prefix("http://") {
-        push_unique_thumbnail_url(urls, seen, format!("https://{rest}"));
-    }
-    push_unique_thumbnail_url(urls, seen, normalized);
-}
-
-fn push_unique_thumbnail_url(urls: &mut Vec<String>, seen: &mut BTreeSet<String>, url: String) {
-    if seen.insert(url.clone()) {
-        urls.push(url);
-    }
-}
-
-pub fn parse_progress_line(line: &str) -> Option<DownloadProgress> {
-    let payload = line.strip_prefix(PROGRESS_PREFIX)?;
-    let parts = payload.split('|').collect::<Vec<_>>();
-    Some(DownloadProgress {
-        status: normalize_status(parts.first().copied().unwrap_or_default()),
-        percent: parse_percent(parts.get(1).copied().unwrap_or_default()),
-        speed: normalize_optional(parts.get(2).copied()),
-        eta: normalize_optional(parts.get(3).copied()),
-        raw: Some(line.to_string()),
-    })
-}
-
-fn parse_percent(value: &str) -> Option<f64> {
-    let number = value
-        .chars()
-        .filter(|character| character.is_ascii_digit() || *character == '.')
-        .collect::<String>();
-    number
-        .parse::<f64>()
-        .ok()
-        .map(|percent| percent.clamp(0.0, 100.0))
-}
-
-fn normalize_status(value: &str) -> String {
-    match value.trim() {
-        "downloading" => "Downloading".to_string(),
-        "finished" => "Merging".to_string(),
-        "error" => "Failed".to_string(),
-        "" => "Processing".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn normalize_optional(value: Option<&str>) -> Option<String> {
-    let value = value?.trim();
-    if value.is_empty() || value == "N/A" {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
-pub fn emit_progress(app: &AppHandle, progress: DownloadProgress) {
-    let _ = app.emit("download-progress", progress);
-}
-
 pub fn emit_tool_install_progress(app: &AppHandle, progress: ToolInstallProgress) {
     let _ = app.emit("tool-install-progress", progress);
-}
-
-pub fn set_active_process(state: &DownloadProcessState, pid: u32) -> Result<()> {
-    {
-        let mut guard = state.active_pid.lock().map_err(|e| AppError::Lock(e.to_string()))?;
-        *guard = Some(pid);
-    }
-    {
-        let mut guard = state.cancel_requested.lock().map_err(|e| AppError::Lock(e.to_string()))?;
-        *guard = false;
-    }
-    Ok(())
-}
-
-pub fn clear_active_process(state: &DownloadProcessState, pid: u32) {
-    if let Ok(mut guard) = state.active_pid.lock() {
-        if guard.is_some_and(|active_pid| active_pid == pid) {
-            *guard = None;
-        }
-    }
-    if let Ok(mut guard) = state.cancel_requested.lock() {
-        *guard = false;
-    }
-}
-
-pub fn was_cancel_requested(state: &DownloadProcessState) -> bool {
-    state
-        .cancel_requested
-        .lock()
-        .map(|guard| *guard)
-        .unwrap_or(false)
-}
-
-pub fn kill_process_tree(pid: u32) -> Result<()> {
-    let pid_text = pid.to_string();
-    let mut command = if cfg!(target_os = "windows") {
-        let mut command = background_command("taskkill");
-        command.args(["/PID", &pid_text, "/T", "/F"]);
-        command
-    } else {
-        let mut command = background_command("kill");
-        command.args(["-TERM", &pid_text]);
-        command
-    };
-    let output = command
-        .output()
-        .map_err(|error| AppError::Custom(format!("Failed to start cancel command for process {pid}: {error}")))?;
-
-    if output.status.success() {
-        append_log("download", &format!("Cancel requested for process {pid}."));
-        Ok(())
-    } else {
-        Err(AppError::Custom(process_failure_message(
-            &format!("Failed to cancel process {pid}."),
-            output.status.code(),
-            &output.stderr,
-            &output.stdout,
-        )))
-    }
-}
-
-pub fn download_directory() -> Result<PathBuf> {
-    let configured = state_directory()?.join("download-directory.txt");
-    if configured.exists() {
-        let value = fs::read_to_string(configured)?;
-        let value = value.trim();
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
-        }
-    }
-
-    Ok(default_download_directory())
-}
-
-pub fn cookies_file() -> Result<Option<PathBuf>> {
-    let configured = cookies_file_state_path()?;
-    if configured.exists() {
-        let value = fs::read_to_string(configured)?;
-        let value = value.trim();
-        if !value.is_empty() {
-            return Ok(Some(PathBuf::from(value)));
-        }
-    }
-
-    Ok(None)
-}
-
-pub fn prepared_cookies_file_for_url(url: &str) -> Result<Option<PreparedCookiesFile>> {
-    let Some(path) = cookies_file()? else {
-        return Ok(None);
-    };
-
-    prepare_cookies_file_path_for_url(&path, url).map(Some)
-}
-
-pub fn validate_cookies_file_path(path: &Path) -> Result<()> {
-    if !path.is_file() {
-        return Err(AppError::Custom(format!("Cookie file does not exist: {}", path.display())));
-    }
-
-    fs::File::open(path)
-        .map(|_| ())
-        .map_err(|error| AppError::Custom(format!("Cookie file cannot be opened: {}: {error}", path.display())))
-}
-
-pub fn prepare_cookies_file_path_for_url(
-    path: &Path,
-    url: &str,
-) -> Result<PreparedCookiesFile> {
-    validate_cookies_file_path(path)?;
-    let content = fs::read_to_string(path).map_err(|error| {
-        AppError::Custom(format!(
-            "Cookie file cannot be read as text: {}: {error}",
-            path.display()
-        ))
-    })?;
-
-    if is_netscape_cookie_content(&content) {
-        return Ok(PreparedCookiesFile::new(path.to_path_buf(), false));
-    }
-
-    if !looks_like_cookie_header_content(&content) {
-        return Err(AppError::Custom(
-            "Cookie file must be Netscape cookies.txt or a one-line Cookie header such as `a=b; c=d`."
-                .to_string(),
-        ));
-    }
-
-    let converted = cookie_header_to_netscape_content(url, &content)?;
-    let converted_path = temp_cookies_file_path();
-    fs::write(&converted_path, converted).map_err(|error| {
-        AppError::Custom(format!(
-            "Failed to prepare temporary Cookie header file at {}: {error}",
-            converted_path.display()
-        ))
-    })?;
-
-    Ok(PreparedCookiesFile::new(converted_path, true))
-}
-
-pub fn cookies_file_state_path() -> Result<PathBuf> {
-    Ok(state_directory()?.join("cookies-file.txt"))
-}
-
-pub fn yt_dlp_cookie_args(cookies_file: Option<&Path>) -> Vec<String> {
-    cookies_file
-        .map(|path| vec!["--cookies".to_string(), path.display().to_string()])
-        .unwrap_or_default()
-}
-
-pub fn is_netscape_cookie_content(content: &str) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return false;
-        }
-
-        line.split('\t').count() == 7
-    })
-}
-
-pub fn looks_like_cookie_header_content(content: &str) -> bool {
-    parse_cookie_header_pairs(content)
-        .map(|pairs| !pairs.is_empty())
-        .unwrap_or(false)
-}
-
-pub fn cookie_header_to_netscape_content(url: &str, content: &str) -> Result<String> {
-    let (domain, include_subdomains) = cookie_domain_for_url(url)?;
-    let include_subdomains = if include_subdomains { "TRUE" } else { "FALSE" };
-    let secure = if url.starts_with("https://") {
-        "TRUE"
-    } else {
-        "FALSE"
-    };
-    let pairs = parse_cookie_header_pairs(content)?;
-    if pairs.is_empty() {
-        return Err(AppError::Custom("Cookie header file does not contain any cookie pairs.".to_string()));
-    }
-
-    let mut lines = vec![
-        "# Netscape HTTP Cookie File".to_string(),
-        "# Generated by yt-dlp-tauri from a Cookie header file.".to_string(),
-    ];
-
-    for (name, value) in pairs {
-        lines.push(format!(
-            "{domain}\t{include_subdomains}\t/\t{secure}\t{COOKIE_HEADER_EXPIRY}\t{name}\t{value}"
-        ));
-    }
-    lines.push(String::new());
-    Ok(lines.join("\n"))
-}
-
-pub fn parse_cookie_header_pairs(content: &str) -> Result<Vec<(String, String)>> {
-    let joined = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let header = strip_cookie_header_prefix(&joined).trim();
-    if !header.contains('=') {
-        return Err(AppError::Custom("Cookie header file does not contain `name=value` pairs.".to_string()));
-    }
-
-    let mut pairs = Vec::new();
-    for part in header.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        let Some((name, value)) = part.split_once('=') else {
-            return Err(AppError::Custom(format!("Cookie header entry is missing `=`: {part}")));
-        };
-        let name = name.trim();
-        if name.is_empty() || !is_safe_cookie_field(name) {
-            return Err(AppError::Custom(format!(
-                "Cookie header contains an invalid cookie name: {name}"
-            )));
-        }
-        if !is_safe_cookie_field(value) {
-            return Err(AppError::Custom(format!(
-                "Cookie header contains an invalid value for {name}."
-            )));
-        }
-
-        pairs.push((name.to_string(), value.trim().to_string()));
-    }
-
-    Ok(pairs)
-}
-
-fn strip_cookie_header_prefix(content: &str) -> &str {
-    let trimmed = content.trim_start();
-    if trimmed
-        .get(..7)
-        .map(|prefix| prefix.eq_ignore_ascii_case("cookie:"))
-        .unwrap_or(false)
-    {
-        &trimmed[7..]
-    } else {
-        trimmed
-    }
-}
-
-fn is_safe_cookie_field(value: &str) -> bool {
-    !value
-        .chars()
-        .any(|character| character == '\t' || character == '\r' || character == '\n')
-}
-
-pub fn cookie_domain_for_url(url: &str) -> Result<(String, bool)> {
-    let host = http_url_host(url)
-        .ok_or_else(|| AppError::Custom("Unable to determine host for Cookie header conversion.".to_string()))?;
-    if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() {
-        return Ok((host, false));
-    }
-
-    let labels = host
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if labels.len() < 2 {
-        return Ok((host, false));
-    }
-
-    let base = if labels.len() > 2 && labels.first().is_some_and(|label| *label == "www") {
-        labels[1..].join(".")
-    } else if labels.len() > 2 {
-        labels[labels.len() - 2..].join(".")
-    } else {
-        host
-    };
-
-    Ok((format!(".{base}"), true))
-}
-
-fn http_url_host(url: &str) -> Option<String> {
-    let (_, rest) = url.split_once("://")?;
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
-    if authority.starts_with('[') {
-        return authority
-            .split_once(']')
-            .map(|(host, _)| host.trim_start_matches('[').to_ascii_lowercase());
-    }
-
-    authority
-        .split(':')
-        .next()
-        .filter(|host| !host.trim().is_empty())
-        .map(|host| host.trim().to_ascii_lowercase())
-}
-
-fn temp_cookies_file_path() -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    env::temp_dir().join(format!(
-        "yt-dlp-tauri-cookies-{}-{stamp}.txt",
-        std::process::id()
-    ))
-}
-
-fn default_download_directory() -> PathBuf {
-    home_directory()
-        .map(|home| home.join("Downloads").join("yt-dlp-tauri"))
-        .unwrap_or_else(|| {
-            env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("downloads")
-        })
-}
-
-pub fn tools_directory() -> Result<PathBuf> {
-    let state_dir = state_directory()?;
-    let path_file = state_dir.join("tools-directory.txt");
-    if let Ok(content) = fs::read_to_string(&path_file) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
-        }
-    }
-    let target = current_tool_target()?;
-    Ok(app_data_root()?.join(TOOLS_DIRECTORY).join(target))
-}
-
-pub fn app_data_root() -> Result<PathBuf> {
-    if cfg!(target_os = "windows") {
-        if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-            return Ok(PathBuf::from(local_app_data).join("yt-dlp-tauri"));
-        }
-    }
-
-    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(xdg_data_home).join("yt-dlp-tauri"));
-    }
-
-    home_directory()
-        .map(|home| home.join(".local").join("share").join("yt-dlp-tauri"))
-        .ok_or_else(|| AppError::Custom("Unable to determine app data directory.".to_string()))
-}
-
-pub fn state_directory() -> Result<PathBuf> {
-    Ok(app_data_root()?.join("state"))
-}
-
-pub fn log_directory() -> Result<PathBuf> {
-    Ok(app_data_root()?.join("logs"))
-}
-
-pub fn ensure_writable_directories() -> Result<()> {
-    fs::create_dir_all(app_data_root()?)?;
-    fs::create_dir_all(state_directory()?)?;
-    fs::create_dir_all(log_directory()?)?;
-    fs::create_dir_all(download_directory()?)?;
-    Ok(())
-}
-
-pub fn append_log(phase: &str, message: &str) {
-    let Ok(directory) = log_directory() else {
-        return;
-    };
-    if fs::create_dir_all(&directory).is_err() {
-        return;
-    }
-    let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(directory.join("app.log"))
-    else {
-        return;
-    };
-    let sanitized = message.replace('\r', " ").replace('\n', " ");
-    let _ = writeln!(file, "{} [{phase}] {sanitized}", unix_timestamp());
-}
-
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-fn home_directory() -> Option<PathBuf> {
-    env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
-        .map(PathBuf::from)
-}
-
-pub fn background_command(program: impl AsRef<OsStr>) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = Command::new(program);
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    }
-    #[cfg(not(windows))]
-    {
-        Command::new(program)
-    }
-}
-
-pub fn validate_http_url(url: &str) -> Result<()> {
-    let trimmed = url.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(AppError::Custom("Enter a valid http or https video URL.".to_string()))
-    }
-}
-
-pub fn first_line(bytes: &[u8]) -> Option<String> {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
-}
-
-pub fn process_failure_message(
-    action: &str,
-    code: Option<i32>,
-    stderr: &[u8],
-    stdout: &[u8],
-) -> String {
-    let status = match code {
-        Some(code) => format!("Exit code {code}."),
-        None => "Process terminated without an exit code.".to_string(),
-    };
-    let details = first_line(stderr).or_else(|| first_line(stdout));
-
-    match details {
-        Some(details) => format!("{action} {status} {details}"),
-        None => format!("{action} {status}"),
-    }
-}
-
-pub fn open_path(path: &Path) -> Result<()> {
-    let mut command = if cfg!(target_os = "windows") {
-        let mut command = Command::new("explorer");
-        command.arg(path);
-        command
-    } else if cfg!(target_os = "macos") {
-        let mut command = Command::new("open");
-        command.arg(path);
-        command
-    } else {
-        let mut command = Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
-
-    command.spawn()?;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn resolves_relative_path_correctly() {
@@ -1457,7 +799,7 @@ mod tests {
 
     #[test]
     fn production_manifest_uses_fixed_release_urls() {
-        let manifest = include_str!("../tools-manifest.json");
+        let manifest = include_str!("../../tools-manifest.json");
         let manifest: ToolsManifest =
             serde_json::from_str(manifest).expect("manifest should parse");
 
@@ -1484,7 +826,7 @@ mod tests {
 
     #[test]
     fn production_manifest_contains_expected_tool_targets() {
-        let manifest = include_str!("../tools-manifest.json");
+        let manifest = include_str!("../../tools-manifest.json");
         let manifest: ToolsManifest =
             serde_json::from_str(manifest).expect("manifest should parse");
         let targets: BTreeMap<_, _> = manifest
@@ -1516,122 +858,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn omits_cookie_args_without_configured_file() {
-        assert!(yt_dlp_cookie_args(None).is_empty());
-    }
-
-    #[test]
-    fn passes_configured_cookie_file_to_yt_dlp() {
-        let args = yt_dlp_cookie_args(Some(Path::new("account-cookies.txt")));
-
-        assert_eq!(
-            args,
-            vec!["--cookies".to_string(), "account-cookies.txt".to_string()]
-        );
-    }
-
-    #[test]
-    fn converts_cookie_header_file_content_to_netscape_cookie_content() {
-        let content = cookie_header_to_netscape_content(
-            "https://www.bilibili.com/video/BV1test",
-            "Cookie: buvid3=abc; bili_jct=token_value; CURRENT_FNVAL=2000",
-        )
-        .expect("cookie header should convert");
-
-        assert_eq!(
-            content,
-            [
-                "# Netscape HTTP Cookie File",
-                "# Generated by yt-dlp-tauri from a Cookie header file.",
-                ".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tbuvid3\tabc",
-                ".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tbili_jct\ttoken_value",
-                ".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tCURRENT_FNVAL\t2000",
-                "",
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
-    fn converts_bare_cookie_header_file_content_to_netscape_cookie_content() {
-        let content = cookie_header_to_netscape_content(
-            "https://www.bilibili.com/video/BV1test",
-            "buvid3=abc; bili_jct=token_value",
-        )
-        .expect("bare cookie header should convert");
-
-        assert!(content.contains(".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tbuvid3\tabc"));
-        assert!(content.contains(".bilibili.com\tTRUE\t/\tTRUE\t2147483647\tbili_jct\ttoken_value"));
-    }
-
-    #[test]
-    fn detects_netscape_cookie_content() {
-        assert!(is_netscape_cookie_content(
-            "# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tFALSE\t0\tbuvid3\tabc\n"
-        ));
-        assert!(!is_netscape_cookie_content(
-            "buvid3=abc; bili_jct=token_value"
-        ));
-    }
-
-    #[test]
-    fn process_failure_message_prefers_stderr() {
-        let message = process_failure_message(
-            "Failed to download yt-dlp.",
-            Some(22),
-            b"curl: (22) The requested URL returned error: 404\n",
-            b"ignored stdout\n",
-        );
-
-        assert_eq!(
-            message,
-            "Failed to download yt-dlp. Exit code 22. curl: (22) The requested URL returned error: 404"
-        );
-    }
-
-    #[test]
-    fn process_failure_message_falls_back_to_stdout() {
-        let message = process_failure_message(
-            "Failed to extract archive.",
-            None,
-            b"",
-            b"Archive is invalid\n",
-        );
-
-        assert_eq!(
-            message,
-            "Failed to extract archive. Process terminated without an exit code. Archive is invalid"
-        );
-    }
-
-    #[test]
-    fn parse_metadata_upgrades_http_thumbnail_candidates() {
-        let metadata = parse_metadata_json(
-            r#"
-            {
-              "title": "Bilibili test",
-              "webpage_url": "https://www.bilibili.com/video/BV1test",
-              "thumbnail": "http://i0.hdslb.com/bfs/archive/cover.jpg",
-              "formats": []
-            }
-            "#,
-            "https://www.bilibili.com/video/BV1test",
-        )
-        .expect("metadata should parse");
-
-        assert_eq!(
-            metadata.thumbnail_url.as_deref(),
-            Some("https://i0.hdslb.com/bfs/archive/cover.jpg")
-        );
-        assert_eq!(
-            metadata.thumbnail_urls,
-            vec![
-                "https://i0.hdslb.com/bfs/archive/cover.jpg".to_string(),
-                "http://i0.hdslb.com/bfs/archive/cover.jpg".to_string()
-            ]
-        );
     }
 }

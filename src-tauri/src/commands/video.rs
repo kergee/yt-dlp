@@ -3,12 +3,12 @@ use crate::state::{
     CachedToolPaths, DownloadProcessState, DownloadProgress, DownloadRequest,
 };
 use crate::utils::{
-    append_log, background_command, clear_active_process, download_directory,
-    emit_progress, ensure_writable_directories, kill_process_tree, locate_tools,
-    parse_metadata_json, parse_progress_line, prepared_cookies_file_for_url,
-    process_failure_message, require_tools, set_active_process, validate_http_url,
+    append_log, background_command, cleanup_incomplete_downloads, clear_active_process,
+    download_directory, emit_progress, ensure_writable_directories, kill_process_tree,
+    locate_tools, parse_metadata_json, parse_progress_line, prepared_cookies_file_for_url,
+    process_failure_message, proxy_url, require_tools, set_active_process, validate_http_url,
     was_cancel_requested, BEST_MP4_FORMAT, OUTPUT_PATH_PREFIX, PROGRESS_PREFIX,
-    yt_dlp_cookie_args,
+    yt_dlp_cookie_args, yt_dlp_proxy_args,
 };
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
@@ -28,6 +28,7 @@ pub async fn parse_metadata(
         let tools = locate_tools(&app_clone, &cache)?;
         require_tools(&tools)?;
         let cookies_file = prepared_cookies_file_for_url(&url)?;
+        let proxy = proxy_url()?;
         append_log("metadata", &format!("Parsing {url}"));
 
         let mut command = background_command(&tools.yt_dlp);
@@ -44,6 +45,7 @@ pub async fn parse_metadata(
             .args(yt_dlp_cookie_args(
                 cookies_file.as_ref().map(|f| f.path()),
             ))
+            .args(yt_dlp_proxy_args(proxy.as_deref()))
             .arg(&url)
             .output()?;
 
@@ -79,10 +81,11 @@ pub async fn download_video(
         ensure_writable_directories()?;
         let output_dir = download_directory()?;
         let cookies_file = prepared_cookies_file_for_url(&request.url)?;
+        let proxy = proxy_url()?;
         append_log("download", &format!("Starting {} {}", request.label, request.url));
 
         let mut command = background_command(&tools.yt_dlp);
-        let mut child = command
+        command
             .args([
                 "--ignore-config",
                 "--no-playlist",
@@ -103,6 +106,7 @@ pub async fn download_video(
             .args(yt_dlp_cookie_args(
                 cookies_file.as_ref().map(|f| f.path()),
             ))
+            .args(yt_dlp_proxy_args(proxy.as_deref()))
             .args([
                 "--progress-template",
                 &format!(
@@ -115,7 +119,10 @@ pub async fn download_video(
             ])
             .arg(&request.url)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let download_started_at = std::time::SystemTime::now();
+        let mut child = command
             .spawn()
             .map_err(|error| AppError::Custom(format!("Failed to start yt-dlp at {}: {error}", tools.yt_dlp.display())))?;
         
@@ -178,6 +185,7 @@ pub async fn download_video(
             let cancelled = was_cancel_requested(&process_state);
             clear_active_process(&process_state, pid);
             if cancelled {
+                cleanup_incomplete_downloads(&output_dir, download_started_at);
                 append_log("download", "Cancelled by user.");
                 return Err(AppError::Custom("Download cancelled.".to_string()));
             }

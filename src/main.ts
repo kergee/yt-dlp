@@ -49,6 +49,7 @@ type AppState = {
   deno_path: string;
   cookies_file: string | null;
   cookies_status: "none" | "valid" | "warning";
+  proxy_url: string | null;
 };
 
 type Language = "en" | "zh";
@@ -122,7 +123,13 @@ const translations: Record<Language, Record<string, string>> = {
     "cookies.none": "No cookies",
     "notice.linksCopied": "Toolchain download links copied to clipboard!",
     "settings.chooseTool": "Select {name} binary",
-    "notice.toolchainSaved": "Toolchain paths saved successfully."
+    "notice.toolchainSaved": "Toolchain paths saved successfully.",
+    "settings.proxy": "Proxy",
+    "settings.proxyHint": "Optional. Used for parsing and downloading, e.g. http://127.0.0.1:7890",
+    "settings.proxyPlaceholder": "http://127.0.0.1:7890",
+    "action.clearProxy": "Clear",
+    "notice.proxyUpdated": "Proxy address saved.",
+    "notice.proxyCleared": "Proxy address cleared."
   },
   zh: {
     "app.title": "全能视频下载器",
@@ -191,7 +198,13 @@ const translations: Record<Language, Record<string, string>> = {
     "cookies.none": "未设置 Cookie",
     "notice.linksCopied": "工具下载地址已复制到剪贴板！",
     "settings.chooseTool": "选择 {name} 可执行文件",
-    "notice.toolchainSaved": "工具链路径保存成功。"
+    "notice.toolchainSaved": "工具链路径保存成功。",
+    "settings.proxy": "代理",
+    "settings.proxyHint": "可选。用于解析和下载，例如 http://127.0.0.1:7890",
+    "settings.proxyPlaceholder": "http://127.0.0.1:7890",
+    "action.clearProxy": "清除",
+    "notice.proxyUpdated": "代理地址已保存。",
+    "notice.proxyCleared": "代理地址已清除。"
   }
 };
 
@@ -270,6 +283,9 @@ const elements = {
   browseFolder: must<HTMLButtonElement>("#browse-folder"),
   saveFolder: must<HTMLButtonElement>("#save-folder"),
   resetFolder: must<HTMLButtonElement>("#reset-folder"),
+  proxyInput: must<HTMLInputElement>("#proxy-input"),
+  saveProxy: must<HTMLButtonElement>("#save-proxy"),
+  clearProxy: must<HTMLButtonElement>("#clear-proxy"),
   toolsInfoBtn: must<HTMLButtonElement>("#tools-info-btn"),
   ytDlpInput: must<HTMLInputElement>("#yt-dlp-input"),
   ffmpegInput: must<HTMLInputElement>("#ffmpeg-input"),
@@ -418,6 +434,8 @@ function bindEvents() {
   elements.browseFolder.addEventListener("click", () => void browseDownloadFolder());
   elements.saveFolder.addEventListener("click", () => void saveDownloadFolder());
   elements.resetFolder.addEventListener("click", () => void resetDownloadFolder());
+  elements.saveProxy.addEventListener("click", () => void saveProxyUrl());
+  elements.clearProxy.addEventListener("click", () => void clearProxyUrl());
   elements.thumbnail.addEventListener("load", () => showLoadedThumbnail());
   elements.thumbnail.addEventListener("error", () => loadNextThumbnailCandidate());
   elements.quality.addEventListener("change", () => {
@@ -574,6 +592,7 @@ async function loadAppState() {
   elements.ffmpegInput.value = appState.ffmpeg_path || "";
   elements.ffprobeInput.value = appState.ffprobe_path || "";
   elements.denoInput.value = appState.deno_path || "";
+  elements.proxyInput.value = appState.proxy_url || "";
   renderCookiesFile(appState.cookies_file ?? null);
   state.cookiesStatus = appState.cookies_status as "none" | "valid" | "warning";
   if (state.cookiesStatus === "warning") {
@@ -769,6 +788,26 @@ async function resetDownloadFolder() {
     elements.folderText.textContent = appState.download_directory;
     elements.folderInput.value = appState.download_directory;
     showNotice("notice.folderReset", "success");
+  } catch (error) {
+    showNotice(String(error), "error");
+  }
+}
+
+async function saveProxyUrl() {
+  try {
+    const appState = await invoke<AppState>("set_proxy_url", { url: elements.proxyInput.value });
+    elements.proxyInput.value = appState.proxy_url || "";
+    showNotice("notice.proxyUpdated", "success");
+  } catch (error) {
+    showNotice(String(error), "error");
+  }
+}
+
+async function clearProxyUrl() {
+  try {
+    const appState = await invoke<AppState>("clear_proxy_url");
+    elements.proxyInput.value = appState.proxy_url || "";
+    showNotice("notice.proxyCleared", "success");
   } catch (error) {
     showNotice(String(error), "error");
   }
@@ -984,6 +1023,8 @@ function updateButtons() {
   elements.browseFolder.disabled = state.busy;
   elements.saveFolder.disabled = state.busy;
   elements.resetFolder.disabled = state.busy;
+  elements.saveProxy.disabled = state.busy;
+  elements.clearProxy.disabled = state.busy;
   elements.browseYtDlp.disabled = state.busy;
   elements.browseFfmpeg.disabled = state.busy;
   elements.browseFfprobe.disabled = state.busy;
@@ -1010,5 +1051,5 @@ function fileNameFromPath(path: string) {
 bootstrap();
 bindEvents();
 listen<string>("wechat_video_intercepted", (event) => onWeChatVideoIntercepted(event.payload));
-listen("cookies_synced", onCookiesSynced);
-listen<DownloadProgress>("download_progress", (e) => updateDownloadProgress(e.payload));
+listen("cookies-synced", onCookiesSynced);
+listen<DownloadProgress>("download-progress", (e) => updateDownloadProgress(e.payload));

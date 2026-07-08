@@ -1,23 +1,47 @@
 use crate::error::{AppError, Result};
 use crate::state::AppState;
 use crate::utils::{
-    append_log, build_app_state, state_directory,
+    append_log, build_app_state, http_url_host, state_directory, validate_http_url,
     COOKIE_HEADER_EXPIRY,
 };
 use std::collections::BTreeSet;
 use std::fs;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindowBuilder, WebviewUrl, WindowEvent};
 
-async fn sync_webview_cookies_internal(app: &AppHandle) -> Result<AppState> {
+const DEFAULT_LOGIN_URL: &str = "https://passport.bilibili.com/login";
+const DEFAULT_COOKIE_LOOKUP_URL: &str = "https://www.bilibili.com";
+
+/// Resolves which page to open for login and which URL to read cookies back from,
+/// based on the site the user was trying to reach. Bilibili keeps its known-good
+/// dedicated login page; every other site falls back to its own homepage.
+fn resolve_login_target(target_url: Option<&str>) -> (String, String) {
+    let host = target_url
+        .filter(|url| validate_http_url(url).is_ok())
+        .and_then(http_url_host);
+
+    let Some(host) = host else {
+        return (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string());
+    };
+
+    if host.ends_with("bilibili.com") {
+        return (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string());
+    }
+
+    let site_url = format!("https://{host}/");
+    (site_url.clone(), site_url)
+}
+
+async fn sync_webview_cookies_internal(app: &AppHandle, cookie_lookup_url: &str) -> Result<AppState> {
     let mut cookies = Vec::new();
 
-    let bilibili_url = tauri::Url::parse("https://www.bilibili.com")?;
+    let lookup_url = tauri::Url::parse(cookie_lookup_url)?;
+    let fallback_host = http_url_host(cookie_lookup_url).unwrap_or_default();
 
     let main_window = app
         .get_webview_window("main")
         .ok_or_else(|| AppError::Custom("Main window not found".to_string()))?;
-    
-    if let Ok(c) = main_window.cookies_for_url(bilibili_url) {
+
+    if let Ok(c) = main_window.cookies_for_url(lookup_url) {
         cookies.extend(c);
     }
 
@@ -28,14 +52,21 @@ async fn sync_webview_cookies_internal(app: &AppHandle) -> Result<AppState> {
 
     let mut seen = BTreeSet::new();
 
-    let mut add_cookie = |cookie: &tauri::webview::Cookie<'static>, domain: &str| {
+    let mut add_cookie = |cookie: &tauri::webview::Cookie<'static>| {
         let name = cookie.name();
-        if seen.contains(&(domain.to_string(), name.to_string())) {
+        let domain = cookie
+            .domain()
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback_host.clone());
+        if domain.is_empty() {
             return;
         }
-        seen.insert((domain.to_string(), name.to_string()));
+        if seen.contains(&(domain.clone(), name.to_string())) {
+            return;
+        }
+        seen.insert((domain.clone(), name.to_string()));
 
-        let include_subdomains = "TRUE";
+        let include_subdomains = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
         let path = cookie.path().unwrap_or("/");
         let secure = if cookie.secure().unwrap_or(false) {
             "TRUE"
@@ -50,7 +81,7 @@ async fn sync_webview_cookies_internal(app: &AppHandle) -> Result<AppState> {
     };
 
     for cookie in &cookies {
-        add_cookie(cookie, ".bilibili.com");
+        add_cookie(cookie);
     }
 
     if seen.is_empty() {
@@ -76,12 +107,14 @@ async fn sync_webview_cookies_internal(app: &AppHandle) -> Result<AppState> {
 }
 
 #[tauri::command]
-pub async fn open_login_window(app: AppHandle) -> Result<()> {
+pub async fn open_login_window(app: AppHandle, target_url: Option<String>) -> Result<()> {
+    let (login_url, cookie_lookup_url) = resolve_login_target(target_url.as_deref());
+
     tauri::async_runtime::spawn(async move {
         if let Some(window) = app.get_webview_window("login") {
             let _ = window.set_focus();
         } else {
-            let url = match tauri::Url::parse("https://passport.bilibili.com/login") {
+            let url = match tauri::Url::parse(&login_url) {
                 Ok(u) => u,
                 Err(e) => {
                     append_log("login", &format!("Failed to parse login URL: {e}"));
@@ -90,7 +123,7 @@ pub async fn open_login_window(app: AppHandle) -> Result<()> {
             };
 
             let builder = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
-                .title("Bilibili Login")
+                .title("Web Login")
                 .inner_size(800.0, 600.0);
 
             match builder.build() {
@@ -99,8 +132,11 @@ pub async fn open_login_window(app: AppHandle) -> Result<()> {
                     window.on_window_event(move |event| {
                         if let WindowEvent::Destroyed = event {
                             let app_clone = app_handle.clone();
+                            let cookie_lookup_url = cookie_lookup_url.clone();
                             tauri::async_runtime::spawn(async move {
-                                if let Err(e) = sync_webview_cookies_internal(&app_clone).await {
+                                if let Err(e) =
+                                    sync_webview_cookies_internal(&app_clone, &cookie_lookup_url).await
+                                {
                                     append_log("login", &format!("Cookie auto-sync failed: {e}"));
                                 } else {
                                     append_log("login", "Cookie auto-sync successful.");
@@ -120,5 +156,5 @@ pub async fn open_login_window(app: AppHandle) -> Result<()> {
 
 #[tauri::command]
 pub async fn sync_webview_cookies(app: AppHandle) -> Result<AppState> {
-    sync_webview_cookies_internal(&app).await
+    sync_webview_cookies_internal(&app, DEFAULT_COOKIE_LOOKUP_URL).await
 }

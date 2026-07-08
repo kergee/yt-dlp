@@ -12,6 +12,7 @@ pub struct AppState {
     pub deno_path: String,
     pub cookies_file: Option<String>,
     pub cookies_status: String,
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

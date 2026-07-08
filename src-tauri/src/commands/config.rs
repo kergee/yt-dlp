@@ -121,6 +121,36 @@ pub async fn clear_cookies_file() -> Result<AppState> {
 }
 
 #[tauri::command]
+pub async fn set_proxy_url(url: String) -> Result<AppState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::Custom("Proxy address cannot be empty.".to_string()));
+        }
+
+        let state_dir = state_directory()?;
+        fs::create_dir_all(&state_dir)?;
+        fs::write(state_dir.join("proxy-url.txt"), trimmed)?;
+
+        build_app_state(String::new())
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn clear_proxy_url() -> Result<AppState> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state_file = state_directory()?.join("proxy-url.txt");
+        if state_file.exists() {
+            fs::remove_file(state_file)?;
+        }
+
+        build_app_state(String::new())
+    })
+    .await?
+}
+
+#[tauri::command]
 pub async fn open_download_directory() -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let directory = download_directory()?;
