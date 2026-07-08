@@ -12,23 +12,22 @@ const DEFAULT_LOGIN_URL: &str = "https://passport.bilibili.com/login";
 const DEFAULT_COOKIE_LOOKUP_URL: &str = "https://www.bilibili.com";
 
 /// Resolves which page to open for login and which URL to read cookies back from,
-/// based on the site the user was trying to reach. Bilibili keeps its known-good
-/// dedicated login page; every other site falls back to its own homepage.
+/// based on what the user typed in the main URL field. Bilibili keeps its known-good
+/// dedicated login page; every other URL is opened exactly as typed, so pasting a
+/// specific login page (e.g. `https://accounts.google.com/signin`) opens that page
+/// verbatim instead of always collapsing to the site's homepage. Cookie lookup uses
+/// the same URL since cookies_for_url matches by host regardless of path.
 fn resolve_login_target(target_url: Option<&str>) -> (String, String) {
-    let host = target_url
-        .filter(|url| validate_http_url(url).is_ok())
-        .and_then(http_url_host);
-
-    let Some(host) = host else {
+    let Some(url) = target_url.filter(|url| validate_http_url(url).is_ok()) else {
         return (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string());
     };
 
-    if host.ends_with("bilibili.com") {
+    let is_bilibili = http_url_host(url).is_some_and(|host| host.ends_with("bilibili.com"));
+    if is_bilibili {
         return (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string());
     }
 
-    let site_url = format!("https://{host}/");
-    (site_url.clone(), site_url)
+    (url.to_string(), url.to_string())
 }
 
 async fn sync_webview_cookies_internal(app: &AppHandle, cookie_lookup_url: &str) -> Result<AppState> {
@@ -173,4 +172,45 @@ pub async fn open_login_window(app: AppHandle, target_url: Option<String>) -> Re
 #[tauri::command]
 pub async fn sync_webview_cookies(app: AppHandle) -> Result<AppState> {
     sync_webview_cookies_internal(&app, DEFAULT_COOKIE_LOOKUP_URL).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_bilibili_login_without_a_target_url() {
+        assert_eq!(
+            resolve_login_target(None),
+            (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_bilibili_login_for_an_invalid_url() {
+        assert_eq!(
+            resolve_login_target(Some("not a url")),
+            (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string())
+        );
+    }
+
+    #[test]
+    fn uses_the_dedicated_bilibili_login_page_regardless_of_the_path() {
+        assert_eq!(
+            resolve_login_target(Some("https://www.bilibili.com/video/BV1test")),
+            (DEFAULT_LOGIN_URL.to_string(), DEFAULT_COOKIE_LOOKUP_URL.to_string())
+        );
+    }
+
+    #[test]
+    fn opens_other_sites_at_the_exact_url_the_user_typed() {
+        let target = resolve_login_target(Some("https://accounts.google.com/signin"));
+        assert_eq!(
+            target,
+            (
+                "https://accounts.google.com/signin".to_string(),
+                "https://accounts.google.com/signin".to_string()
+            )
+        );
+    }
 }
